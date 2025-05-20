@@ -1,3 +1,9 @@
+# -----------------------------------------------------------------------------
+# Scraper para extraer datos de investigadores de la Universidad de La Frontera
+# -----------------------------------------------------------------------------
+# LEER README.md para instrucciones de uso
+# -----------------------------------------------------------------------------
+
 import time
 import csv
 import os
@@ -202,3 +208,14 @@ if batch:
 
 driver.quit()
 print("✅ Scraping completado. Resultados en", CSV_FILE)
+
+# -----------------------------------------------------------------------------
+# Autor:       Tomás Eduardo Gutiérrez Olcay, Estudiante Ingeniería Civil Industrial mención Informática 
+# Organización:Universidad de La Frontera – Equipo de Datos VRIP UFRO
+# Email:       t.gutierrez04@ufromail.cl
+# Fecha:       20/05/2025
+# Proyecto:    Scraping de CVs investigadores UFRO
+# Versión:     1.0
+# Licencia:    MIT License
+# -----------------------------------------------------------------------------
+
