@@ -11,191 +11,190 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURACIÓN BÁSICA ---
 CSV_FILE    = "resultados_investigadores.csv"
-BATCH_SIZE  = 20
+BATCH_SIZE  = 2
 START_INDEX = 0
 URL_BASE    = "https://extranet.ufro.cl/investigacion/ver_cv_investigacion.php"
+DOWNLOAD_DIR = os.path.join(os.getcwd(), "pdfs")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # --- UTILIDADES ---
 def split_name(fullname: str):
-    """
-    Divide 'Nombre Completo' en (nombre, paterno, materno):
-      - 1 palabra  → (nombre, "", "")
-      - 2 palabras → (parts[0], parts[1], "")
-      - 3 palabras → (parts[0], parts[1], parts[2])
-      - >=4 →       (parts[0], parts[-2], parts[-1])
-    """
     parts = fullname.strip().split()
-    n = len(parts)
-    if n == 0:
-        return "", "", ""
-    if n == 1:
-        return parts[0], "", ""
-    if n == 2:
-        return parts[0], parts[1], ""
-    if n == 3:
-        return parts[0], parts[1], parts[2]
+    if len(parts) <= 3:
+        return (parts + ["","",""])[:3]
     return parts[0], parts[-2], parts[-1]
 
-def parse_table(section_title):
-    """Extrae filas de la tabla inmediatamente posterior a un <h3> dado."""
-    try:
-        tbl = driver.find_element(
-            By.XPATH,
-            f"//h3[text()='{section_title}']/following-sibling::table[1]"
-        )
-        rows = tbl.find_elements(By.TAG_NAME, "tr")[1:]
-        return " || ".join(
-            " | ".join(td.text.strip() for td in row.find_elements(By.TAG_NAME, "td"))
-            for row in rows
-        )
-    except:
-        return ""
+def extract_personal():
+    """Extrae las cuatro filas de Datos Personales."""
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#div_cont table")))
+    tabla = driver.find_element(By.CSS_SELECTOR, "#div_cont table")
+    filas = tabla.find_elements(By.TAG_NAME, "tr")[1:5]
+    datos = {}
+    for fila in filas:
+        c = fila.find_elements(By.TAG_NAME, "td")
+        key = c[1].text.strip().rstrip(":")
+        val = " ".join(c[2].text.strip().split())
+        datos[key] = val
+    return datos
 
-# Crear CSV con cabecera si no existe
+def extract_academic_degrees():
+    """
+    Construye un string con todos los grados académicos,
+    separados por '||' para que queden juntos en una sola columna.
+    """
+    tablas = driver.find_elements(By.CSS_SELECTOR, "#div_cont table")
+    degrees = []
+    # Encuentra índice de la tabla "TITULOS/GRADOS ACADÉMICOS"
+    for i, tbl in enumerate(tablas):
+        th = tbl.find_elements(By.TAG_NAME, "th")
+        if th and "TITULOS/GRADOS ACADÉMICOS" in th[0].text.upper():
+            # Las 3 tablas siguientes contienen los grados
+            for deg_tbl in tablas[i+1:i+4]:
+                label = None
+                val   = None
+                # Primera fila de cada tabla: Titulo Profesional / Doctor / Magíster
+                first_row = deg_tbl.find_elements(By.TAG_NAME, "tr")[0]
+                cells = first_row.find_elements(By.TAG_NAME, "td")
+                if len(cells) >= 2:
+                    label = cells[0].text.strip().rstrip(":")
+                    # Combina texto y país (span)
+                    txt = cells[1].text.strip().replace("\n", " ")
+                    val = " ".join(txt.split())
+                if label and val:
+                    degrees.append(f"{val}")
+            break
+    # Une con '||' entre cada grado
+    return " || ".join(degrees)
+
+def extract_all_tables():
+    """
+    Convierte a texto todas las tablas excepto la primera
+    (Datos Personales) y las académicas.
+    """
+    tablas = driver.find_elements(By.CSS_SELECTOR, "#div_cont table")
+    # localizar índice académico
+    acad_idx = None
+    for i, tbl in enumerate(tablas):
+        th = tbl.find_elements(By.TAG_NAME, "th")
+        if th and "TITULOS/GRADOS ACADÉMICOS" in th[0].text.upper():
+            acad_idx = i
+            break
+
+    resultados = []
+    for idx, tbl in enumerate(tablas):
+        if idx == 0 or (acad_idx is not None and acad_idx <= idx <= acad_idx+3):
+            continue
+        filas = tbl.find_elements(By.TAG_NAME, "tr")
+        texto = " || ".join(
+            " | ".join(td.text.strip() for td in fila.find_elements(By.TAG_NAME, "td"))
+            for fila in filas[1:]
+        )
+        resultados.append(texto)
+    return " ~~ ".join(resultados)
+
+# --- Crear CSV con cabecera si no existe ---
 if not os.path.exists(CSV_FILE):
     with open(CSV_FILE, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "ID","Nombre Buscado","Nombre Completo","Sexo","Unidad",
-            "E-Mail","Título Profesional","Institución",
-            "Proyectos","Publicaciones","Link CV PDF","Estado"
+        csv.writer(f).writerow([
+            "Investigador","E-Mail","Fono/Anexo","Unidad(es)",
+            "Grados Académicos","Tablas (todas)","PDF_Local","Estado"
         ])
 
-# Inicializar WebDriver
+# --- Inicializar WebDriver ---
 options = webdriver.ChromeOptions()
-# options.add_argument("--headless")
 options.add_argument("--no-sandbox")
+options.add_experimental_option("prefs", {
+    "download.default_directory": DOWNLOAD_DIR,
+    "plugins.always_open_pdf_externally": True
+})
 driver = webdriver.Chrome(
     service=Service(ChromeDriverManager().install()),
     options=options
 )
 wait = WebDriverWait(driver, 15)
 
-# Leer Excel de entrada
-df_in = pd.read_excel("UFRO_Planta2022-2024.xlsx", engine="openpyxl")
-nombres = df_in["Nombre Completo"].tolist()
+# --- Leer Excel de entrada ---
+df = pd.read_excel("UFRO_Planta2022-2024.xlsx", engine="openpyxl")
+nombres = df["Nombre Completo"].tolist()
 
 batch = []
 _current_id = START_INDEX
 
-for idx, nombre_full in enumerate(nombres[START_INDEX:], start=START_INDEX+1):
+for nombre_full in nombres[START_INDEX:]:
     _current_id += 1
     nombre, paterno, materno = split_name(nombre_full)
 
-    # 1) Navegar al formulario
+    # 1) Abrir y buscar
     driver.get(URL_BASE)
     wait.until(EC.presence_of_element_located((By.ID, "nombre_filtro")))
-
-    # 2) Rellenar filtros y buscar
-    driver.find_element(By.ID, "nombre_filtro").clear()
     driver.find_element(By.ID, "nombre_filtro").send_keys(nombre)
-    driver.find_element(By.ID, "paterno_filtro").clear()
     driver.find_element(By.ID, "paterno_filtro").send_keys(paterno)
-    driver.find_element(By.ID, "materno_filtro").clear()
     driver.find_element(By.ID, "materno_filtro").send_keys(materno)
     driver.find_element(By.XPATH, "//input[@value='BUSCAR']").click()
 
-    # 3) Esperar la tabla de resultados
+    # 2) Esperar resultados
     try:
         wait.until(EC.presence_of_element_located((
             By.XPATH, "//table[contains(@class,'Tabla_lst')]/tbody/tr[position()>1]"
         )))
     except:
         batch.append({
-            "ID": _current_id,
-            "Nombre Buscado": nombre_full,
-            "Estado": "Sin resultados"
+            "Investigador": nombre_full, "E-Mail": "", "Fono/Anexo": "",
+            "Unidad(es)": "", "Grados Académicos": "",
+            "Tablas (todas)": "", "PDF_Local": "", "Estado": "Sin resultados"
         })
-        print(f"[{_current_id}] {nombre_full}: Sin resultados")
         continue
 
-    # 4) Buscar el enlace exacto y extraer su href (que es del tipo "javascript:Load(...)")
-    rows = driver.find_elements(
-        By.XPATH,
-        "//table[contains(@class,'Tabla_lst')]/tbody/tr[position()>1]"
-    )
-    load_call = None
-
-    for r in rows:
-        cols = r.find_elements(By.TAG_NAME, "td")
-        if len(cols) >= 2:
-          nombre_en_tabla = cols[1].text.strip().lower()
-          if nombre_en_tabla == nombre_full.lower():
-            a_tag = cols[1].find_element(By.TAG_NAME, "a")
-            href = a_tag.get_attribute("href") or ""
+    # 3) Cargar perfil
+    load_js = None
+    for row in driver.find_elements(By.XPATH,
+            "//table[contains(@class,'Tabla_lst')]/tbody/tr[position()>1]"):
+        cols = row.find_elements(By.TAG_NAME, "td")
+        if len(cols) >= 2 and cols[1].text.strip().lower() == nombre_full.lower():
+            href = cols[1].find_element(By.TAG_NAME, "a").get_attribute("href") or ""
             if href.startswith("javascript:Load"):
-              load_call = href[len("javascript:"):]  # elimina "javascript:" para ejecutar
+                load_js = href.split("javascript:")[1]
             break
 
-
-    if not load_call:
-        estado = "No se encontró enlace exacto"
-        batch.append({"ID": _current_id, "Nombre Buscado": nombre_full, "Estado": estado})
-        print(f"[{_current_id}] {nombre_full}: {estado}")
-        continue
-
-    # 5) Ejecutar la llamada Load(...) vía JS para cargar el perfil
-    driver.execute_script(load_call)
-
-    # 6) Esperar que cargue el div_cont y el campo "Investigador"
-    try:
-        wait.until(EC.presence_of_element_located((By.ID, "div_cont")))
-        wait.until(EC.presence_of_element_located((
-            By.XPATH, "//td[contains(text(),'Investigador')]/following-sibling::td"
-        )))
-    except:
+    if not load_js:
         batch.append({
-            "ID": _current_id,
-            "Nombre Buscado": nombre_full,
-            "Estado": "Perfil no cargó tras Load()"
+            "Investigador": nombre_full, "E-Mail": "", "Fono/Anexo": "",
+            "Unidad(es)": "", "Grados Académicos": "",
+            "Tablas (todas)": "", "PDF_Local": "", "Estado": "Enlace no encontrado"
         })
-        print(f"[{_current_id}] {nombre_full}: Perfil no cargó tras Load()")
         continue
 
-    # 7) Extraer datos del perfil
-    def get_td(label):
-        try:
-            return driver.find_element(
-                By.XPATH,
-                f"//td[contains(text(),'{label}')]/following-sibling::td"
-            ).text.strip()
-        except:
-            return ""
+    driver.execute_script(load_js)
+    time.sleep(2)
+    wait.until(EC.presence_of_element_located((By.ID, "div_cont")))
+
+    # 4) Extraer datos
+    personal = extract_personal()
+    degrees  = extract_academic_degrees()
+    tablas    = extract_all_tables()
 
     info = {
-        "ID": _current_id,
-        "Nombre Buscado": nombre_full,
-        "Nombre Completo": get_td("Investigador"),
-        "Sexo": get_td("Sexo"),
-        "Unidad": get_td("Unidad"),
-        "E-Mail": get_td("E-Mail"),
-        "Título Profesional": get_td("Título Profesional"),
-        "Institución": get_td("Institución"),
-        "Proyectos": parse_table("Proyectos"),
-        "Publicaciones": parse_table("Publicaciones"),
-        "Link CV PDF": "",
-        "Estado": "OK"
+        "Investigador":      personal.get("Investigador",""),
+        "E-Mail":            personal.get("E-Mail",""),
+        "Fono/Anexo":        personal.get("Fono/Anexo",""),
+        "Unidad(es)":        personal.get("Unidad(es)",""),
+        "Grados Académicos": degrees,
+        "Tablas (todas)":    tablas,
+        "PDF_Local":         "",
+        "Estado":            "OK"
     }
 
-    # 8) Si existe un enlace a PDF, guardarlo
-    try:
-        info["Link CV PDF"] = driver.find_element(
-            By.XPATH, "//a[contains(@href,'.pdf')]"
-        ).get_attribute("href")
-    except:
-        pass
-
     batch.append(info)
-    print(f"[{_current_id}] Procesado: {info['Nombre Completo']}")
+    print(f"[{_current_id}] Procesado: {info['Investigador']}")
 
-    # 9) Volcar cada BATCH_SIZE registros al CSV
+    # 5) Volcado parcial
     if len(batch) >= BATCH_SIZE:
         pd.DataFrame(batch).to_csv(
             CSV_FILE, mode="a", index=False, header=False, encoding="utf-8-sig"
         )
         batch.clear()
 
-# Volcar remanentes
+# 6) Volcar remanentes y cerrar
 if batch:
     pd.DataFrame(batch).to_csv(
         CSV_FILE, mode="a", index=False, header=False, encoding="utf-8-sig"
